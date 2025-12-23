@@ -1,0 +1,32 @@
+# Nextflow runtime and cache
+.nextflow*
+*.nextflow.log
+*.report.html
+*.timeline.html
+*.trace
+*.dag.png
+.nextflow.cache/
+
+# Pipeline working/output directories
+nextflow_pipeline/work/
+nextflow_pipeline/results/
+nextflow_pipeline/star_out/
+nextflow_pipeline/MULTIQC/
+nextflow_pipeline/SUMMARIZE/
+nextflow_pipeline/STAR_ARRIBA*/
+nextflow_pipeline/.nextflow*
+nextflow_pipeline/.command.*
+
+# Logs and run artifacts
+*.out
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

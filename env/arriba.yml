@@ -1,0 +1,28 @@
+name: arriba
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - arriba>=2.4
+  - star=2.7.10a
+  - samtools
+  - sra-tools
+  - seqtk
+  - fastqc
+  - multiqc
+  - pigz
+  - zstd
+  - zlib
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - tqdm
+  - pip
+  - pip:
+      - papermill

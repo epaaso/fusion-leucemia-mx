@@ -1,0 +1,14 @@
+name: arriba_pipeline
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - star=2.7.10b
+  - arriba=2.5.1
+  - fastqc=0.12.1
+  - multiqc=1.19
+  - pandas
+  - samtools
+  - star-fusion
+  - bbmap
