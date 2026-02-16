@@ -12,8 +12,8 @@ def main():
     parser.add_argument(
         "--format",
         default="auto",
-        choices=["auto", "arriba", "starfusion"],
-        help="Input format (auto, arriba, starfusion)",
+        choices=["auto", "arriba", "starfusion", "fusioncatcher"],
+        help="Input format (auto, arriba, starfusion, fusioncatcher)",
     )
     args = parser.parse_args()
 
@@ -56,6 +56,8 @@ def main():
             return "arriba"
         if "LeftGene" in columns and "RightGene" in columns:
             return "starfusion"
+        if "Gene_1_symbol(5end_fusion_partner)" in columns and "Gene_2_symbol(3end_fusion_partner)" in columns:
+            return "fusioncatcher"
         return None
 
     input_format = args.format
@@ -68,6 +70,9 @@ def main():
     elif input_format == "starfusion":
         gene1_col = "LeftGene"
         gene2_col = "RightGene"
+    elif input_format == "fusioncatcher":
+        gene1_col = "Gene_1_symbol(5end_fusion_partner)"
+        gene2_col = "Gene_2_symbol(3end_fusion_partner)"
     else:
         print("Error: Unable to detect fusion format. Use --format arriba or starfusion.")
         sys.exit(1)

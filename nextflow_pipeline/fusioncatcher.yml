@@ -1,0 +1,8 @@
+name: fusioncatcher_env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - fusioncatcher
+  - pandas

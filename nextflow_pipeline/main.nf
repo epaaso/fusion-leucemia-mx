@@ -3,8 +3,31 @@
 nextflow.enable.dsl = 2
 
 def method = (params.method ?: 'arriba').toString().toLowerCase()
+def skip_fastqc = (params.skip_fastqc?.toString()?.toBoolean()) ?: false
 
-def check_refs(String method) {
+def resolve_fusioncatcher_db_dir() {
+    def configured = file(params.fusioncatcher_dir)
+    if (!configured.exists()) return configured
+
+    if (file("${configured}/organism.txt").exists()) return configured
+
+    def candidates = configured
+        .toFile()
+        .listFiles()
+        ?.findAll { it.isDirectory() && new File(it, 'organism.txt').exists() } ?: []
+
+    if (candidates.size() == 1) {
+        def detected = file(candidates[0].toString())
+        log.warn "FusionCatcher DB auto-detected at '${detected}' because '${configured}' has no organism.txt"
+        return detected
+    }
+
+    return configured
+}
+
+def fusioncatcher_db_dir = method == 'fusioncatcher' ? resolve_fusioncatcher_db_dir() : null
+
+def check_refs(String method, def fusioncatcher_db_dir) {
     def missing = []
 
     if (method == 'arriba') {
@@ -16,8 +39,14 @@ def check_refs(String method) {
         if (!file(params.protein_domains).exists()) missing.add(params.protein_domains)
     } else if (method == 'starfusion') {
         if (!file(params.starfusion_genome_lib).exists()) missing.add(params.starfusion_genome_lib)
+    } else if (method == 'fusioncatcher') {
+        if (!fusioncatcher_db_dir.exists()) {
+            missing.add(params.fusioncatcher_dir)
+        } else if (!file("${fusioncatcher_db_dir}/organism.txt").exists()) {
+            missing.add("${fusioncatcher_db_dir}/organism.txt")
+        }
     } else {
-        error "Unknown method '${params.method}'. Use 'arriba' or 'starfusion'."
+        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion' or 'fusioncatcher'."
     }
 
     if (params.filter_rrna) {
@@ -60,11 +89,11 @@ def make_samples_channel() {
 }
 
 workflow {
-    if (!(method in ['arriba', 'starfusion'])) {
-        error "Unknown method '${params.method}'. Use 'arriba' or 'starfusion'."
+    if (!(method in ['arriba', 'starfusion', 'fusioncatcher'])) {
+        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion' or 'fusioncatcher'."
     }
 
-    check_refs(method)
+    check_refs(method, fusioncatcher_db_dir)
 
     ch_samples_raw = make_samples_channel()
 
@@ -78,7 +107,11 @@ workflow {
         ch_samples = ch_samples_raw
     }
 
-    FASTQC(ch_samples)
+    if (!skip_fastqc) {
+        FASTQC(ch_samples)
+    } else {
+        log.info "Skipping FASTQC and MULTIQC because --skip_fastqc is true"
+    }
 
     if (method == 'arriba') {
         STAR_ARRIBA(ch_samples)
@@ -90,8 +123,15 @@ workflow {
         SUMMARIZE(STARFUSION.out.fusions)
         COMMON_FUSIONS(STARFUSION.out.fusions.map { it[1] }.collect())
     }
+    if (method == 'fusioncatcher') {
+        FUSIONCATCHER(ch_samples)
+        SUMMARIZE(FUSIONCATCHER.out.fusions)
+        COMMON_FUSIONS(FUSIONCATCHER.out.fusions.map { it[1] }.collect())
+    }
 
-    MULTIQC(FASTQC.out.zip.collect().ifEmpty([]))
+    if (!skip_fastqc) {
+        MULTIQC(FASTQC.out.zip.collect().ifEmpty([]))
+    }
 }
 
 process FASTQC {
@@ -193,17 +233,19 @@ process STARFUSION {
     path "*.log", emit: logs, optional: true
 
     script:
-    def r1_csv = r1_reads.join(',')
-    def r2_csv = r2_reads.join(',')
     def extra_args = params.starfusion_extra_args ?: ""
 
     """
     set -euo pipefail
     mkdir -p starfusion_out
 
+    # Merge FASTQs to avoid issues with comma-separated lists in FusionInspector
+    cat ${r1_reads} > combined_R1.fastq.gz
+    cat ${r2_reads} > combined_R2.fastq.gz
+
     STAR-Fusion \\
         --genome_lib_dir ${params.starfusion_genome_lib} \\
-        --left_fq ${r1_csv} --right_fq ${r2_csv} \\
+        --left_fq combined_R1.fastq.gz --right_fq combined_R2.fastq.gz \\
         --CPU ${task.cpus} \\
         ${extra_args} \\
         --output_dir starfusion_out
@@ -278,5 +320,49 @@ process MULTIQC {
     script:
     """
     multiqc .
+    """
+}
+
+process FUSIONCATCHER {
+    tag "$sample_id"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    conda "${projectDir}/fusioncatcher.yml"
+
+    input:
+    tuple val(sample_id), path(r1_reads), path(r2_reads)
+
+    output:
+    tuple val(sample_id), path("fusioncatcher_fusions.txt"), emit: fusions
+    path "fusioncatcher_summary.txt", optional: true
+    path "*.log", optional: true
+    path "final-list_candidate-fusion-genes.txt", optional: true
+
+    script:
+    // Interleave R1/R2 for FusionCatcher input
+    // r1_reads and r2_reads are lists of files
+    def input_files = []
+    r1_reads.eachWithIndex { r1, idx ->
+        input_files.add(r1)
+        if (idx < r2_reads.size()) {
+            input_files.add(r2_reads[idx])
+        }
+    }
+    def input_csv = input_files.join(',')
+    def fusioncatcher_db_abs = fusioncatcher_db_dir.toAbsolutePath().toString()
+
+    """
+    set -euo pipefail
+    
+    # Run FusionCatcher
+    fusioncatcher \\
+        -d "${fusioncatcher_db_abs}" \\
+        -i ${input_csv} \\
+        -o fusioncatcher_out \\
+        -p ${task.cpus}
+
+    # Rename output for consistency with pipeline
+    cp fusioncatcher_out/final-list_candidate-fusion-genes.txt fusioncatcher_fusions.txt
+    cp fusioncatcher_out/summary_candidate_fusions.txt fusioncatcher_summary.txt 2>/dev/null || true
+    cp fusioncatcher_out/*.log . 2>/dev/null || true
     """
 }

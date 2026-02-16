@@ -4,7 +4,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - star=2.7.10b
+  - star=2.7.10a
   - arriba=2.5.1
   - fastqc=0.12.1
   - multiqc=1.19
