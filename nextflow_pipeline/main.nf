@@ -350,9 +350,9 @@ process STAR_ARRIBA {
         --readFilesIn ${r1_csv} ${r2_csv} --readFilesCommand zcat \\
         --quantMode GeneCounts \\
         --outStd BAM_Unsorted --outSAMtype BAM Unsorted --outSAMunmapped Within --outBAMcompression 0 \\
-        --outFilterMultimapNmax 50 --peOverlapNbasesMin 10 --alignSplicedMateMapLminOverLmate 0.5 --alignSJstitchMismatchNmax 5 -1 5 5 \\
-        --chimSegmentMin 10 --chimOutType WithinBAM HardClip --chimJunctionOverhangMin 10 --chimScoreDropMax 30 \\
-        --chimScoreJunctionNonGTAG 0 --chimScoreSeparation 1 --chimSegmentReadGapMax 3 --chimMultimapNmax 50 \\
+        --outFilterMultimapNmax ${params.star_out_filter_multimap_nmax} --peOverlapNbasesMin 10 --alignSplicedMateMapLminOverLmate 0.5 --alignSJstitchMismatchNmax 5 -1 5 5 \\
+        --chimSegmentMin 10 --chimOutType ${params.star_chim_out_type} --chimJunctionOverhangMin 10 --chimScoreDropMax 30 \\
+        --chimScoreJunctionNonGTAG 0 --chimScoreSeparation 1 --chimSegmentReadGapMax 3 --chimMultimapNmax ${params.star_chim_multimap_nmax} \\
         --outFileNamePrefix star_out/${sample_id}. \\
     | arriba \\
         -x /dev/stdin \\
