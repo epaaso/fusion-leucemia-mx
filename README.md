@@ -62,6 +62,7 @@ Add `--sample_id SAMPLE123` to run a single sample, and `-resume` to reuse prior
 - `--outdir`: `${launchDir}/results`
 - `--sample_id`: run a single sample (default: all samples found)
 - `--threads`: 16; `--star_ram`: `90.GB`
+- STAR + Arriba sensitivity: `--star_out_filter_multimap_nmax 50`, `--star_chim_out_type 'WithinBAM HardClip'`, `--star_chim_multimap_nmax 50`
 - `--method`: `arriba`, `starfusion`, `fusioncatcher`, or `none` (`none` is ALLSorts-only mode)
 - `--annotate_common_fusions`: add literature/gene annotations to common fusion report
 - `--literature_email`: email for NCBI E-utilities (recommended for PubMed queries)
@@ -77,7 +78,7 @@ Add `--sample_id SAMPLE123` to run a single sample, and `-resume` to reuse prior
 
 ## Workflow Steps
 - FASTQC: QC for each pair of reads
-- STAR + Arriba: stream alignments to Arriba; uses STAR `Chimeric.out.junction` for fusion calling
+- STAR + Arriba: streams an unsorted BAM containing supplementary chimeric alignments (`--chimOutType WithinBAM HardClip`) from STAR to Arriba through stdin. Multimap limits are set to 50 to improve sensitivity for repetitive and complex rearrangements such as `DUX4::IGH`, which can provide evidence consistent with enhancer hijacking; the fusion call alone does not prove the regulatory mechanism.
 - STAR-Fusion: runs STAR-Fusion directly on FASTQs using a CTAT genome lib
 - FusionCatcher: runs FusionCatcher on FASTQs (automatically interleaves paired-end reads)
 - STAR counts (for ALLSorts when needed): creates per-sample `ReadsPerGene.out.tab`
