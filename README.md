@@ -72,7 +72,7 @@ Add `--sample_id SAMPLE123` to run a single sample, and `-resume` to reuse prior
 - `--rrna_ref`: rRNA reference FASTA for filtering (required if `--filter_rrna`)
 - Reference paths: `--ref_dir` (default `${fastq_dir}/arriba_refs`), `--genome_fasta`, `--gtf`, `--star_index`
 - Arriba resources: `--blacklist`, `--known_fusions`, `--protein_domains`, `--cytobands`
-- STAR-Fusion resources: `--starfusion_genome_lib`, `--starfusion_extra_args`
+- STAR-Fusion resources: `--starfusion_genome_lib`, `--starfusion_extra_args`, `--starfusion_threads 19`, `--starfusion_ram 100.GB`, `--starfusion_max_forks 1`. A single run may require 80-100 GB, so this 125-GiB host processes one STAR-Fusion sample at a time.
 - FusionCatcher resources: `--fusioncatcher_dir`
 - ALLSorts: `--run_allsorts`, `--allsorts_counts_csv`, `--allsorts_reads_glob`, `--allsorts_strand`, `--allsorts_model_dir`, `--allsorts_parents`, `--allsorts_ball`
 
@@ -100,6 +100,52 @@ Add `--sample_id SAMPLE123` to run a single sample, and `-resume` to reuse prior
 - `${outdir}/${sample_id}/qc/` from FastQC
 - `${outdir}/multiqc/multiqc_report.html`
 - STAR/Arriba logs for each sample alongside outputs
+
+## Shared STAR Alignment (arriba_starfusion)
+
+The combined `--method arriba_starfusion` mode runs STAR alignment once per sample using a CTAT pseudo-masked reference, streams the unsorted BAM directly to Arriba, and retains `Chimeric.out.junction` in the Nextflow work cache for concurrent STAR-Fusion post-processing. This reduces alignment overhead and optimizes resource usage.
+
+> [!IMPORTANT]
+> **FusionCatcher Alignment Exemption:** FusionCatcher cannot participate in the shared STAR alignment workflow because it does not accept pre-aligned BAM or chimeric junction files as input. It requires raw FASTQ reads and will always perform its own separate, duplicate alignment from scratch under the hood (using its internal multi-stage Bowtie/Bowtie2/STAR alignment pipeline).
+
+
+### Quickstart Example
+```bash
+nextflow run nextflow_pipeline/main.nf \
+  -profile conda \
+  --fastq_dir /path/to/fastqs \
+  --ref_dir /path/to/arriba_refs \
+  --outdir /path/to/results \
+  --method arriba_starfusion \
+  --star_index /path/to/arriba_refs/star_grch38_v50_unmasked \
+  --starfusion_genome_lib /path/to/arriba_refs/GRCh38_gencode_v50_CTAT_lib/ctat_genome_lib_build_dir \
+  --gtf /path/to/arriba_refs/gencode.v50.basic.annotation.gtf
+```
+
+### Reference Locking and Masking Behavior
+- **Primary Reference:** Built on GRCh38 assembly and GENCODE v50.
+- **CTAT Pseudo-Masked Reference:** A pseudo-masked reference bundle is used for STAR-Fusion and the shared alignment.
+- **Unmasked Reference:** A matching unmasked STAR index is built for fallback Arriba alignments.
+- **Note:** Reference versions must never be mixed within a production cohort.
+
+### Efficient Resource Scheduling
+Process resources are configured to maximize throughput on a 20-CPU/125-GiB host:
+- `STAR_SHARED_ARRIBA`: memory-heavy task allocated `16 cpus`, `100.GB` RAM, and restricted to `maxForks: 1` to ensure only one alignment runs at a time.
+- `STARFUSION_CALL`: lightweight junction-processing task allocated `1 cpu`, `12.GB` RAM, and running concurrently with `maxForks: 4`.
+
+### Validation & Fallback Workflow
+Before enabling the combined mode for the full cohort, validate using:
+1. `LAL1276_S9` (known `DUX4::IGH` candidate)
+2. `103-MO-15-563486477` (strong `TCF3::PBX1` control)
+
+Compare shared-workflow results against caller-specific outputs. The validation fails if:
+- Expected `DUX4::IGH` or `TCF3::PBX1` evidence disappears.
+- Clinically relevant fusions are lost.
+- Support decreases materially or reference masking causes unacceptable Arriba behavior.
+
+**Fallback Workflow:** If validation fails, production uses separate alignments:
+- Unmasked GRCh38/GENCODE v50 STAR index for Arriba streaming (`--method arriba`).
+- CTAT pseudo-masked GRCh38/GENCODE v50 reference library for STAR-Fusion (`--method starfusion`).
 
 ## Notes
 - Ensure the reference bundle exists before running; `check_refs()` currently emits warnings instead of stopping the run.

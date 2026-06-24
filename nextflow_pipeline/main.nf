@@ -39,13 +39,16 @@ def check_refs(
 ) {
     def missing = []
 
-    if (method == 'arriba') {
+    if (method == 'arriba' || method == 'arriba_starfusion') {
         if (!file(params.genome_fasta).exists()) missing.add(params.genome_fasta)
         if (!file(params.gtf).exists()) missing.add(params.gtf)
         if (!file(params.star_index).exists()) missing.add(params.star_index)
         if (!file(params.blacklist).exists()) missing.add(params.blacklist)
         if (!file(params.known_fusions).exists()) missing.add(params.known_fusions)
         if (!file(params.protein_domains).exists()) missing.add(params.protein_domains)
+        if (method == 'arriba_starfusion') {
+            if (!file(params.starfusion_genome_lib).exists()) missing.add(params.starfusion_genome_lib)
+        }
     } else if (method == 'starfusion') {
         if (!file(params.starfusion_genome_lib).exists()) missing.add(params.starfusion_genome_lib)
     } else if (method == 'fusioncatcher') {
@@ -57,7 +60,7 @@ def check_refs(
     } else if (method == 'none') {
         // Allows ALLSorts-only runs when precomputed inputs are provided.
     } else {
-        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion', 'fusioncatcher', or 'none'."
+        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion', 'fusioncatcher', 'arriba_starfusion', or 'none'."
     }
 
     if (params.filter_rrna) {
@@ -177,8 +180,8 @@ def make_allsorts_external_reads_channel() {
 }
 
 workflow {
-    if (!(method in ['arriba', 'starfusion', 'fusioncatcher', 'none'])) {
-        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion', 'fusioncatcher', or 'none'."
+    if (!(method in ['arriba', 'starfusion', 'fusioncatcher', 'none', 'arriba_starfusion'])) {
+        error "Unknown method '${params.method}'. Use 'arriba', 'starfusion', 'fusioncatcher', 'arriba_starfusion', or 'none'."
     }
 
     if (method == 'none' && !run_allsorts) {
@@ -252,6 +255,17 @@ workflow {
             FUSIONCATCHER(ch_samples)
             SUMMARIZE(FUSIONCATCHER.out.fusions)
             COMMON_FUSIONS(FUSIONCATCHER.out.fusions.map { it[1] }.collect())
+        }
+        if (method == 'arriba_starfusion') {
+            STAR_SHARED_ARRIBA(ch_samples)
+            STARFUSION_CALL(STAR_SHARED_ARRIBA.out.chimeric_junction)
+            SUMMARIZE_ARRIBA(STAR_SHARED_ARRIBA.out.arriba_fusions)
+            SUMMARIZE_STARFUSION(STARFUSION_CALL.out.fusions)
+            COMMON_FUSIONS_ARRIBA(STAR_SHARED_ARRIBA.out.arriba_fusions.map { it[1] }.collect())
+            COMMON_FUSIONS_STARFUSION(STARFUSION_CALL.out.fusions.map { it[1] }.collect())
+            if (run_allsorts && !has_external_allsorts_counts && !has_external_allsorts_reads) {
+                ch_allsorts_reads = STAR_SHARED_ARRIBA.out.reads_per_gene
+            }
         }
 
         if (!skip_fastqc) {
@@ -403,6 +417,83 @@ process STARFUSION {
     """
 }
 
+process STAR_SHARED_ARRIBA {
+    tag "$sample_id"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "arriba_fusions.tsv"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "arriba_fusions.discarded.tsv"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "${sample_id}.ReadsPerGene.out.tab"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "*.{out,tab,log}"
+
+    input:
+    tuple val(sample_id), path(r1_reads), path(r2_reads)
+
+    output:
+    tuple val(sample_id), path("arriba_fusions.tsv"), emit: arriba_fusions
+    tuple val(sample_id), path("arriba_fusions.discarded.tsv"), emit: arriba_discarded
+    tuple val(sample_id), path("${sample_id}.ReadsPerGene.out.tab"), emit: reads_per_gene
+    tuple val(sample_id), path("star_out/${sample_id}.Chimeric.out.junction"), emit: chimeric_junction
+    path "*.{out,tab,log}", emit: logs, optional: true
+
+    script:
+    def r1_csv = r1_reads.join(',')
+    def r2_csv = r2_reads.join(',')
+
+    """
+    set -euo pipefail
+    mkdir -p star_out
+
+    # Streaming mode: STAR writes BAM to stdout; Arriba reads from stdin.
+    STAR --runThreadN ${task.cpus} \\
+        --genomeDir ${params.star_index} --genomeLoad NoSharedMemory \\
+        --readFilesIn ${r1_csv} ${r2_csv} --readFilesCommand zcat \\
+        --quantMode GeneCounts \\
+        --outStd BAM_Unsorted --outSAMtype BAM Unsorted --outSAMunmapped Within --outBAMcompression 0 \\
+        --outFilterMultimapNmax 50 --peOverlapNbasesMin 10 --alignSplicedMateMapLminOverLmate 0.5 --alignSJstitchMismatchNmax 5 -1 5 5 \\
+        --chimSegmentMin 10 --chimOutType Junctions WithinBAM HardClip --chimJunctionOverhangMin 10 --chimScoreDropMax 30 \\
+        --chimScoreJunctionNonGTAG 0 --chimScoreSeparation 1 --chimSegmentReadGapMax 3 --chimMultimapNmax 50 --chimOutJunctionFormat 1 \\
+        --outFileNamePrefix star_out/${sample_id}. \\
+    | arriba \\
+        -x /dev/stdin \\
+        -o arriba_fusions.tsv -O arriba_fusions.discarded.tsv \\
+        -a ${params.genome_fasta} -g ${params.gtf} \\
+        -b ${params.blacklist} -k ${params.known_fusions} -t ${params.known_fusions} -p ${params.protein_domains}
+
+    cp star_out/*.out star_out/*.tab star_out/*.log . 2>/dev/null || true
+    cp star_out/${sample_id}.ReadsPerGene.out.tab .
+    """
+}
+
+process STARFUSION_CALL {
+    tag "$sample_id"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(chimeric_junction)
+
+    output:
+    tuple val(sample_id), path("star-fusion.fusion_predictions.tsv"), emit: fusions
+    path "star-fusion.fusion_predictions.abridged.tsv", emit: abridged, optional: true
+    path "*.log", emit: logs, optional: true
+
+    script:
+    def extra_args = params.starfusion_extra_args ?: ""
+
+    """
+    set -euo pipefail
+    mkdir -p starfusion_out
+
+    STAR-Fusion \\
+        --genome_lib_dir ${params.starfusion_genome_lib} \\
+        --chimeric_junction ${chimeric_junction} \\
+        ${extra_args} \\
+        --output_dir starfusion_out
+
+    cp starfusion_out/star-fusion.fusion_predictions.tsv .
+    cp starfusion_out/star-fusion.fusion_predictions.abridged.tsv . 2>/dev/null || true
+    cp starfusion_out/*.log . 2>/dev/null || true
+    """
+}
+
 process STAR_COUNTS {
     tag "$sample_id"
     publishDir "${params.outdir}/${sample_id}", mode: 'copy'
@@ -549,6 +640,76 @@ process COMMON_FUSIONS {
     def inputs_arg = fusion_files.collect { it.toString() }.join(' ')
     """
     aggregate_fusions.py --inputs ${inputs_arg} --output ${method}_common_fusions.tsv --format ${method} ${annotate_flag} ${email_arg}
+    """
+}
+
+process SUMMARIZE_ARRIBA {
+    tag "$sample_id"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(fusions)
+
+    output:
+    path "arriba_fusions_protocol.tsv"
+
+    script:
+    """
+    summarize_fusions.py --input ${fusions} --output arriba_fusions_protocol.tsv --format arriba
+    """
+}
+
+process SUMMARIZE_STARFUSION {
+    tag "$sample_id"
+    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(fusions)
+
+    output:
+    path "starfusion_fusions_protocol.tsv"
+
+    script:
+    """
+    summarize_fusions.py --input ${fusions} --output starfusion_fusions_protocol.tsv --format starfusion
+    """
+}
+
+process COMMON_FUSIONS_ARRIBA {
+    tag "arriba"
+    publishDir "${params.outdir}/summary", mode: 'copy'
+
+    input:
+    val fusion_files
+
+    output:
+    path "arriba_common_fusions.tsv"
+
+    script:
+    def annotate_flag = params.annotate_common_fusions ? "--annotate" : "--no-annotate"
+    def email_arg = params.literature_email ? "--email ${params.literature_email}" : ""
+    def inputs_arg = fusion_files.collect { it.toString() }.join(' ')
+    """
+    aggregate_fusions.py --inputs ${inputs_arg} --output arriba_common_fusions.tsv --format arriba ${annotate_flag} ${email_arg}
+    """
+}
+
+process COMMON_FUSIONS_STARFUSION {
+    tag "starfusion"
+    publishDir "${params.outdir}/summary", mode: 'copy'
+
+    input:
+    val fusion_files
+
+    output:
+    path "starfusion_common_fusions.tsv"
+
+    script:
+    def annotate_flag = params.annotate_common_fusions ? "--annotate" : "--no-annotate"
+    def email_arg = params.literature_email ? "--email ${params.literature_email}" : ""
+    def inputs_arg = fusion_files.collect { it.toString() }.join(' ')
+    """
+    aggregate_fusions.py --inputs ${inputs_arg} --output starfusion_common_fusions.tsv --format starfusion ${annotate_flag} ${email_arg}
     """
 }
 
