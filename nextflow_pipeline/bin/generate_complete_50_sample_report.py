@@ -102,6 +102,22 @@ def classify_driver(gene1: str, gene2: str) -> tuple[str, str] | None:
     return None
 
 
+KNOWN_DRIVER_GENES = {
+    "BCR", "ABL1", "ABL2", "PDGFRA", "PDGFRB", "CSF1R", "JAK2", "EPOR",
+    "TCF3", "PBX1", "KMT2A", "DUX4", "ZNF384", "ETV6", "RUNX1", "PAX5",
+    "MEF2D", "NUTM1", "HLF", "STIL", "TAL1", "CRLF2", "P2RY8"
+}
+
+
+def is_pseudogene(gene: str) -> bool:
+    gene = gene.upper()
+    if gene in KNOWN_DRIVER_GENES:
+        return False
+    if re.search(r'P\d+$|P$|-PS\d*$', gene):
+        return True
+    return False
+
+
 def build_allsorts_audit(
     sample_ids: set[str],
     current_path: Path,
@@ -114,21 +130,41 @@ def build_allsorts_audit(
         try:
             df = pd.read_csv(current_path)
             for _, r in df.iterrows():
-                # Columns: sample_id, subtype, probability, pred_flag
                 sid = r.get("sample_id")
-                st = r.get("subtype")
-                prob = r.get("probability")
-                flag = r.get("pred_flag", True)
+                st = r.get("Pred")
+                prob = r.get(st) if pd.notna(st) else 0.0
+                flag = r.get("B-ALL", True)
                 if pd.notna(sid):
                     rows.append({
                         "sample_id": str(sid),
-                        "subtype": str(st),
+                        "subtype": str(st) if pd.notna(st) else "Unclassified",
                         "main_probability": float(prob) if pd.notna(prob) else 0.0,
                         "pred_flag": bool(flag),
                         "allsorts_source": "current_probabilities_csv",
                     })
         except Exception as e:
             print(f"Warning parsing {current_path}: {e}")
+
+    # Historical probabilities from allsorts_50_sample_audit.tsv
+    audit_path = Path("nextflow_pipeline/results/summary/allsorts_50_sample_audit.tsv")
+    if audit_path.exists():
+        try:
+            df_audit = pd.read_csv(audit_path, sep="\t")
+            for _, r in df_audit.iterrows():
+                sid = r.get("sample_id")
+                st = r.get("subtype")
+                prob = r.get("main_probability")
+                flag = r.get("pred_flag", True)
+                if pd.notna(sid):
+                    rows.append({
+                        "sample_id": str(sid),
+                        "subtype": str(st) if pd.notna(st) else "Unclassified",
+                        "main_probability": float(prob) if pd.notna(prob) else 0.0,
+                        "pred_flag": bool(flag),
+                        "allsorts_source": "allsorts_50_sample_audit",
+                    })
+        except Exception as e:
+            print(f"Warning parsing {audit_path}: {e}")
 
     # Historical probabilities from HTML
     if historical_path.exists():
@@ -156,7 +192,7 @@ def build_allsorts_audit(
         # Create empty placeholder if no files found
         combined = pd.DataFrame(columns=["sample_id", "subtype", "main_probability", "pred_flag", "allsorts_source"])
 
-    source_rank = {"current_probabilities_csv": 0, "historical_html": 1}
+    source_rank = {"current_probabilities_csv": 0, "allsorts_50_sample_audit": 1, "historical_html": 2}
     combined["source_rank"] = combined["allsorts_source"].map(source_rank).fillna(9)
     combined = combined.sort_values(["sample_id", "source_rank"]).drop_duplicates(
         "sample_id", keep="first"
@@ -212,8 +248,10 @@ def main():
         default="nextflow_pipeline/results/summary/allsorts/probabilities.csv",
     )
     parser.add_argument(
-        "--historical-report",
-        default="nextflow_pipeline/results/reporte_fusiones_completo.html",
+        "--cohort",
+        choices=["all", "50", "minerva"],
+        default="all",
+        help="Cohort to report: all (72), 50 (leukemia), or minerva (22 new)"
     )
     args = parser.parse_args()
 
@@ -226,6 +264,11 @@ def main():
         if d.is_dir() and d.name not in RESULT_EXCLUDE_DIRS
     ])
 
+    if args.cohort == "50":
+        sample_dirs = [d for d in sample_dirs if not d.name.startswith("H")]
+    elif args.cohort == "minerva":
+        sample_dirs = [d for d in sample_dirs if d.name.startswith("H")]
+
     sample_ids = {d.name for d in sample_dirs}
     total_samples = len(sample_ids)
 
@@ -235,7 +278,7 @@ def main():
     allsorts = build_allsorts_audit(
         sample_ids,
         Path(args.allsorts_current),
-        Path(args.historical_report),
+        Path(args.results_dir) / "reporte_fusiones_completo.html",
     )
     allsorts_dict = allsorts.set_index("sample_id").to_dict(orient="index")
 
@@ -246,10 +289,30 @@ def main():
     arriba_call_counts = {}
     starfusion_call_counts = {}
     fusioncatcher_call_counts = {}
+    sample_star_qc = {}
 
     for sample_dir in sample_dirs:
         sample_id = sample_dir.name
         fusions_by_normalized = {} # normalized_fusion -> fusion_entry
+
+        # STAR Alignment QC Parser
+        star_qc = {"reads": "-", "map_rate": "-", "chimeric": "-"}
+        log_files = list(sample_dir.glob("*.Log.final.out"))
+        if log_files and log_files[0].exists():
+            try:
+                content = log_files[0].read_text(encoding="utf-8")
+                reads_match = re.search(r"Number of input reads\s*\|\s*(\d+)", content)
+                map_match = re.search(r"Uniquely mapped reads %\s*\|\s*([\d.]+)%", content)
+                chim_match = re.search(r"% of chimeric reads\s*\|\s*([\d.]+)%", content)
+                if reads_match:
+                    star_qc["reads"] = f"{int(reads_match.group(1)) / 1_000_000:.1f} M"
+                if map_match:
+                    star_qc["map_rate"] = f"{map_match.group(1)}%"
+                if chim_match:
+                    star_qc["chimeric"] = f"{chim_match.group(1)}%"
+            except Exception as e:
+                print(f"Error parsing STAR log for {sample_id}: {e}")
+        sample_star_qc[sample_id] = star_qc
 
         # --- 1. ARRIBA ---
         arriba_file = sample_dir / "arriba_fusions.tsv"
@@ -271,6 +334,7 @@ def main():
                     conf = str(row.get("confidence", "low")).lower()
                     frame = str(row.get("reading_frame", "unknown")).lower()
                     ftype = str(row.get("type", "translocation")).lower()
+                    ffilters = str(row.get("filters", "")).lower()
 
                     if norm not in fusions_by_normalized:
                         fusions_by_normalized[norm] = {
@@ -281,6 +345,7 @@ def main():
                             "arriba_detected": True,
                             "arriba_support": f"{conf} ({sr1}+{sr2} SR, {dm} DM)",
                             "arriba_confidence": conf,
+                            "arriba_filters": ffilters,
                             "starfusion_detected": False,
                             "starfusion_support": "-",
                             "fusioncatcher_detected": False,
@@ -292,6 +357,7 @@ def main():
                         fusions_by_normalized[norm]["arriba_detected"] = True
                         fusions_by_normalized[norm]["arriba_support"] = f"{conf} ({sr1}+{sr2} SR, {dm} DM)"
                         fusions_by_normalized[norm]["arriba_confidence"] = conf
+                        fusions_by_normalized[norm]["arriba_filters"] = ffilters
             except Exception as e:
                 print(f"Error parsing Arriba for {sample_id}: {e}")
 
@@ -389,8 +455,18 @@ def main():
                 entry["driver_group"] = driver[0]
                 entry["driver_display"] = driver[1]
             else:
-                entry["driver_group"] = ""
-                entry["driver_display"] = ""
+                is_high_conf = entry.get("arriba_confidence") == "high"
+                ftype = str(entry.get("type", "")).lower()
+                ffilters = str(entry.get("arriba_filters", "")).lower()
+                is_read_through = "read-through" in ftype or "read_through" in ftype or "read-through" in ffilters or "read_through" in ffilters
+                is_pseudo = is_pseudogene(entry["gene1"]) or is_pseudogene(entry["gene2"])
+                
+                if is_high_conf and not is_read_through and not is_pseudo:
+                    entry["driver_group"] = "Non-Driver (High Confidence)"
+                    entry["driver_display"] = f"{entry['gene1']}--{entry['gene2']} (High Confidence)"
+                else:
+                    entry["driver_group"] = ""
+                    entry["driver_display"] = ""
 
             cohort_fusions.append(entry)
 
@@ -791,12 +867,12 @@ def main():
 
 <!-- ============ CALIDAD & LLAMADAS ============ -->
 <div class="card" id="calidad">
-  <h2>&#x2705; Metricas de Ejecucion y Llamadas Totales</h2>
-  <p style="color:var(--muted); margin-bottom:1rem;">Numero de llamadas totales (incluyendo candidatos de baja confianza/ruido) por herramienta.</p>
+  <h2>&#x2705; Metricas de Calidad de Secuenciacion y Mapeo</h2>
+  <p style="color:var(--muted); margin-bottom:1rem;">Medidas de calidad de secuenciacion y mapeo (STAR QC) junto con el numero de llamadas totales por herramienta.</p>
   <div class="table-scroll">
     <table>
       <thead>
-        <tr><th>Muestra</th><th>Llamadas Arriba</th><th>Llamadas STAR-Fusion</th><th>Llamadas FusionCatcher</th></tr>
+        <tr><th>Muestra</th><th>Reads Secuenciadas</th><th>Mapeo Unico (STAR)</th><th>% Quimericas (STAR)</th><th>Llamadas Arriba</th><th>Llamadas STAR-Fusion</th><th>Llamadas FusionCatcher</th></tr>
       </thead>
       <tbody>
 """
@@ -805,8 +881,44 @@ def main():
         sf_cnt = starfusion_call_counts.get(sid, 0)
         fc_cnt = fusioncatcher_call_counts.get(sid, 0)
         
+        qc = sample_star_qc.get(sid, {"reads": "-", "map_rate": "-", "chimeric": "-"})
+        reads_str = qc["reads"]
+        map_str = qc["map_rate"]
+        chim_str = qc["chimeric"]
+        
+        # Color coding for reads count
+        reads_display = reads_str
+        if reads_str != "-":
+            try:
+                reads_val = float(reads_str.replace(" M", ""))
+                if reads_val < 15.0:
+                    reads_display = f"<span class='badge badge-low'>{reads_str}</span>"
+                elif reads_val < 30.0:
+                    reads_display = f"<span class='badge badge-medium'>{reads_str}</span>"
+                else:
+                    reads_display = f"<span class='badge badge-pass'>{reads_str}</span>"
+            except:
+                pass
+                
+        # Color coding for mapping rate
+        map_display = map_str
+        if map_str != "-":
+            try:
+                map_val = float(map_str.replace("%", ""))
+                if map_val < 70.0:
+                    map_display = f"<span class='badge badge-low'>{map_str}</span>"
+                elif map_val < 80.0:
+                    map_display = f"<span class='badge badge-medium'>{map_str}</span>"
+                else:
+                    map_display = f"<span class='badge badge-pass'>{map_str}</span>"
+            except:
+                pass
+                
         html_template += f"""        <tr>
           <td><strong>{esc(sid)}</strong></td>
+          <td>{reads_display}</td>
+          <td>{map_display}</td>
+          <td>{chim_str}</td>
           <td>{arr_cnt}</td>
           <td>{sf_cnt}</td>
           <td>{fc_cnt}</td>

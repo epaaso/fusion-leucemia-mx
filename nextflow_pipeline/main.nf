@@ -7,6 +7,7 @@ def skip_fastqc = (params.skip_fastqc?.toString()?.toBoolean()) ?: false
 def run_allsorts = (params.run_allsorts?.toString()?.toBoolean()) ?: false
 def has_external_allsorts_counts = params.allsorts_counts_csv ? true : false
 def has_external_allsorts_reads = params.allsorts_reads_glob ? true : false
+def qc_only = (params.qc_only?.toString()?.toBoolean()) ?: false
 
 def resolve_fusioncatcher_db_dir() {
     def configured = file(params.fusioncatcher_dir)
@@ -109,7 +110,21 @@ def make_samples_channel() {
     // Group all lane FASTQs by sample directory name, then split into R1/R2 lists.
     Channel
         .fromPath(input_pattern, checkIfExists: true)
-        .map { f -> tuple(f.getParent().getName(), f) }
+        .map { f ->
+            def parent = f.getParent()
+            def runDir = parent.getParent()
+            def sample_id = parent.getName()
+            def run_id = runDir ? runDir.getName() : null
+            def unique_id = sample_id
+            if (run_id && !(run_id in ['fastqs', 'raw', 'fastq', 'minerva_rnaseq', 'leukemia_rnaseq'])) {
+                unique_id = "${run_id}-${sample_id}"
+            }
+            tuple(unique_id, f)
+        }
+        .filter { it ->
+            def unique_id = it[0].toString()
+            !(unique_id in ['H5K7GBGX2-269', 'H5K7GBGX2-545', 'H5K7GBGX2-99', 'H5K7GBGX2-159', 'H5L3CBGX2-123', 'HW2GYBGX2-196'])
+        }
         .groupTuple()
         .map { sample_id, files ->
             def r1 = files.findAll { it.getName().contains('_R1_') }.sort()
@@ -180,6 +195,17 @@ def make_allsorts_external_reads_channel() {
 }
 
 workflow {
+    def ch_samples = null
+    def ch_allsorts_reads = null
+    def ch_allsorts_counts = null
+
+    if (qc_only) {
+        ch_samples = make_samples_channel()
+        FASTQC(ch_samples)
+        MULTIQC(FASTQC.out.zip.collect().ifEmpty([]))
+        return
+    }
+
     if (!(method in ['arriba', 'starfusion', 'fusioncatcher', 'none', 'arriba_starfusion'])) {
         error "Unknown method '${params.method}'. Use 'arriba', 'starfusion', 'fusioncatcher', 'arriba_starfusion', or 'none'."
     }
@@ -203,10 +229,6 @@ workflow {
         has_external_allsorts_counts,
         has_external_allsorts_reads
     )
-
-    def ch_samples = null
-    def ch_allsorts_reads = null
-    def ch_allsorts_counts = null
 
     if (run_allsorts && has_external_allsorts_counts) {
         ch_allsorts_counts = Channel.value(file(params.allsorts_counts_csv))
@@ -292,7 +314,7 @@ workflow {
 
 process FASTQC {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -302,7 +324,7 @@ process FASTQC {
     path "*.zip", emit: zip
 
     script:
-    def fastqs = (r1_reads + r2_reads).join(' ')
+    def fastqs = [r1_reads, r2_reads].flatten().join(' ')
     """
     fastqc -t ${task.cpus} ${fastqs}
     """
@@ -310,7 +332,7 @@ process FASTQC {
 
 process RRNA_FILTER {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/rrna_filter", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}/rrna_filter", mode: 'copy'
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -323,22 +345,28 @@ process RRNA_FILTER {
     path "rrna_${sample_id}.stats", emit: stats
 
     script:
-    def r1_csv = r1_reads.join(',')
-    def r2_csv = r2_reads.join(',')
+    def r1_str = r1_reads instanceof Collection ? r1_reads.join(' ') : r1_reads
+    def r2_str = r2_reads instanceof Collection ? r2_reads.join(' ') : r2_reads
     """
     set -euo pipefail
+    
+    cat ${r1_str} > combined_R1.fastq.gz
+    cat ${r2_str} > combined_R2.fastq.gz
+
     bbduk.sh \\
-        in1=${r1_csv} in2=${r2_csv} \\
+        in1=combined_R1.fastq.gz in2=combined_R2.fastq.gz \\
         out1=${sample_id}_R1.filtered.fastq.gz out2=${sample_id}_R2.filtered.fastq.gz \\
         ref=${params.rrna_ref} k=${params.rrna_k} hdist=${params.rrna_hdist} \\
         stats=rrna_${sample_id}.stats \\
         overwrite=t threads=${task.cpus}
+        
+    rm combined_R1.fastq.gz combined_R2.fastq.gz
     """
 }
 
 process STAR_ARRIBA {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -381,7 +409,7 @@ process STAR_ARRIBA {
 
 process STARFUSION {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -419,10 +447,10 @@ process STARFUSION {
 
 process STAR_SHARED_ARRIBA {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "arriba_fusions.tsv"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "arriba_fusions.discarded.tsv"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "${sample_id}.ReadsPerGene.out.tab"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy', pattern: "*.{out,tab,log}"
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy', pattern: "arriba_fusions.tsv"
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy', pattern: "arriba_fusions.discarded.tsv"
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy', pattern: "${sample_id}.ReadsPerGene.out.tab"
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy', pattern: "*.{out,tab,log}"
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -465,7 +493,7 @@ process STAR_SHARED_ARRIBA {
 
 process STARFUSION_CALL {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(chimeric_junction)
@@ -496,7 +524,7 @@ process STARFUSION_CALL {
 
 process STAR_COUNTS {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(r1_reads), path(r2_reads)
@@ -610,7 +638,7 @@ process ALLSORTS {
 
 process SUMMARIZE {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(fusions)
@@ -626,7 +654,7 @@ process SUMMARIZE {
 
 process COMMON_FUSIONS {
     tag "${method}"
-    publishDir "${params.outdir}/summary", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}", mode: 'copy'
 
     input:
     val fusion_files
@@ -645,7 +673,7 @@ process COMMON_FUSIONS {
 
 process SUMMARIZE_ARRIBA {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(fusions)
@@ -661,7 +689,7 @@ process SUMMARIZE_ARRIBA {
 
 process SUMMARIZE_STARFUSION {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
 
     input:
     tuple val(sample_id), path(fusions)
@@ -677,7 +705,7 @@ process SUMMARIZE_STARFUSION {
 
 process COMMON_FUSIONS_ARRIBA {
     tag "arriba"
-    publishDir "${params.outdir}/summary", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}", mode: 'copy'
 
     input:
     val fusion_files
@@ -696,7 +724,7 @@ process COMMON_FUSIONS_ARRIBA {
 
 process COMMON_FUSIONS_STARFUSION {
     tag "starfusion"
-    publishDir "${params.outdir}/summary", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}", mode: 'copy'
 
     input:
     val fusion_files
@@ -715,7 +743,7 @@ process COMMON_FUSIONS_STARFUSION {
 
 process RRNA_QC {
     tag "rrna_qc"
-    publishDir "${params.outdir}/summary", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}", mode: 'copy'
 
     input:
     val stats_files
@@ -731,7 +759,7 @@ process RRNA_QC {
 }
 
 process MULTIQC {
-    publishDir "${params.outdir}/multiqc", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/multiqc_low_mapping' : '/multiqc'}", mode: 'copy'
 
     input:
     path fastqc_files
@@ -747,7 +775,7 @@ process MULTIQC {
 
 process FUSIONCATCHER {
     tag "$sample_id"
-    publishDir "${params.outdir}/${sample_id}", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}${params.filter_rrna ? '/low_mapping_rrna_filter' : ''}", mode: 'copy'
     conda "${projectDir}/fusioncatcher.yml"
 
     input:
@@ -787,4 +815,17 @@ process FUSIONCATCHER {
     cp fusioncatcher_out/summary_candidate_fusions.txt fusioncatcher_summary.txt 2>/dev/null || true
     cp fusioncatcher_out/*.log . 2>/dev/null || true
     """
+}
+
+workflow.onComplete {
+    log.info "Pipeline completed! Running automatic mapping update..."
+    try {
+        def updateScript = "${projectDir}/update_mapping.py"
+        def cmd = ["python3", updateScript, params.outdir]
+        def proc = cmd.execute()
+        proc.waitFor()
+        log.info "update_mapping.py output: ${proc.text}"
+    } catch (Exception e) {
+        log.error "Failed to run update_mapping.py: ${e.message}"
+    }
 }
