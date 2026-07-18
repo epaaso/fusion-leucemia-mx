@@ -152,3 +152,52 @@ Compare shared-workflow results against caller-specific outputs. The validation 
 - Update `nextflow_pipeline/nextflow.config` if your paths or resource requirements differ.
 - Common fusion annotations are pulled from PubMed abstracts and MyGene.info summaries; set `--literature_email` to comply with NCBI E-utilities usage.
 - For maximum reuse of existing preprocessing, keep `nextflow_pipeline/work/` and run with `-resume`; for historical STAR-Fusion work directories, use `--method none --run_allsorts true --allsorts_reads_glob ...`.
+
+## Generating HTML Reports with Dispersed Results
+
+> [!IMPORTANT]
+> **Clinical Metadata Requirement:** To build consolidated HTML reports and map patients in a clinical context, a clinical metadata table (e.g. `Datos_clinicos_con_fusiones.csv` containing patient IDs, diagnostics, and clinical features) is required. For privacy and data protection compliance, this file must remain strictly local on your machine and must never be committed to Git or pushed to GitHub (it is ignored by default in `.gitignore`).
+
+If your fusion caller outputs (Arriba, STAR-Fusion, FusionCatcher) and your ALLSorts subtype classification results are located in different directories, you can generate a consolidated HTML report by following these methods:
+
+### Method A: Using Command-Line Arguments (Direct)
+You can directly pass different paths to the report generator utility script:
+
+```bash
+python3 nextflow_pipeline/bin/generate_complete_50_sample_report.py \
+  --results-dir /path/to/fusion_caller_results \
+  --allsorts-current /path/to/allsorts_summary/allsorts/probabilities.csv \
+  --output-html /path/to/reporte_fusiones.html
+```
+
+* `--results-dir`: Path to the directory containing individual sample directories (where each subdirectory contains `arriba_fusions.tsv`, etc.).
+* `--allsorts-current`: Path to the ALLSorts `probabilities.csv` file.
+
+### Method B: Consolidating via Symbolic Links (Recommended for Multiple Cohorts)
+If you want to merge multiple cohorts (e.g. 50 original samples and 22 new samples) that were run in different places:
+
+1. Create a central results directory and symlink the sample folders from both locations:
+   ```bash
+   mkdir -p consolidated_results
+   # Link cohort 1 samples
+   for dir in /path/to/cohort1/*; do ln -s "$dir" consolidated_results/$(basename "$dir"); done
+   # Link cohort 2 samples
+   for dir in /path/to/cohort2/*; do ln -s "$dir" consolidated_results/$(basename "$dir"); done
+   ```
+
+2. Merge the ALLSorts probabilities into a single CSV using a Python snippet:
+   ```python
+   import pandas as pd
+   p1 = pd.read_csv('/path/to/cohort1/summary/allsorts/probabilities.csv')
+   p2 = pd.read_csv('/path/to/cohort2/summary/allsorts/probabilities.csv')
+   pd.concat([p1, p2]).drop_duplicates(subset=['sample_id']).to_csv('consolidated_probabilities.csv', index=False)
+   ```
+
+3. Run the report generator:
+   ```bash
+   python3 nextflow_pipeline/bin/generate_complete_50_sample_report.py \
+     --results-dir consolidated_results \
+     --allsorts-current consolidated_probabilities.csv \
+     --output-html reporte_combinado.html
+   ```
+
