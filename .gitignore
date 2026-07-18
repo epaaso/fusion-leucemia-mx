@@ -8,8 +8,11 @@
 .nextflow.cache/
 
 # Pipeline working/output directories
+work
 nextflow_pipeline/work/
 nextflow_pipeline/results/
+resultados_consolidados/
+fastqs_low_mapping/
 nextflow_pipeline/star_out/
 nextflow_pipeline/MULTIQC/
 nextflow_pipeline/SUMMARIZE/
@@ -30,3 +33,10 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Local results and metadata
+Datos_clinicos_con_fusiones.csv
+full_fusion_report.txt
+fusioncatcher_results.tar.gz
+*.html
+
