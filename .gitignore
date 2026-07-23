@@ -40,3 +40,4 @@ full_fusion_report.txt
 fusioncatcher_results.tar.gz
 *.html
 
+run_minerva_pipeline.sh
