@@ -96,6 +96,16 @@ def main():
                     'Result_File': os.path.join(low_mapping_dir, 'star-fusion.fusion_predictions.tsv')
                 })
 
+            if 'fusioncatcher_fusions.txt' in files_in_low:
+                csv_data.append({
+                    'Sample_ID': sample_id,
+                    'Run_Type': 'low_mapping_rrna_filter',
+                    'Caller': 'fusioncatcher',
+                    'Filter_rRNA': 'true',
+                    'Parameters': '--method fusioncatcher --fusioncatcher_dir /datos/migccl/fusioncatcher_data --filter_rrna true --skip_fastqc true',
+                    'Result_File': os.path.join(low_mapping_dir, 'fusioncatcher_fusions.txt')
+                })
+
     # Escribir CSV
     if csv_data:
         headers = ['Sample_ID', 'Run_Type', 'Caller', 'Filter_rRNA', 'Parameters', 'Result_File']

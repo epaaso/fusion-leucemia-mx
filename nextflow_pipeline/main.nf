@@ -350,8 +350,8 @@ process RRNA_FILTER {
     """
     set -euo pipefail
     
-    cat ${r1_str} > combined_R1.fastq.gz
-    cat ${r2_str} > combined_R2.fastq.gz
+    zcat ${r1_str} | pigz -p ${task.cpus} -c > combined_R1.fastq.gz
+    zcat ${r2_str} | pigz -p ${task.cpus} -c > combined_R2.fastq.gz
 
     bbduk.sh \\
         in1=combined_R1.fastq.gz in2=combined_R2.fastq.gz \\
@@ -552,7 +552,7 @@ process STAR_COUNTS {
 }
 
 process BUILD_ALLSORTS_COUNTS {
-    publishDir "${params.outdir}/summary/allsorts", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}/allsorts", mode: 'copy'
 
     input:
     val reads_entries
@@ -590,7 +590,7 @@ process BUILD_ALLSORTS_COUNTS {
 }
 
 process ALLSORTS {
-    publishDir "${params.outdir}/summary/allsorts", mode: 'copy'
+    publishDir "${params.outdir}${params.filter_rrna ? '/summary_low_mapping' : '/summary'}/allsorts", mode: 'copy'
     conda "${projectDir}/allsorts.yml"
 
     input:
